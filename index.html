@@ -1,82 +1,77 @@
-<!DOCTYPE html>
-      </div>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StockLens</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
 
-      <div class="time-wrap">
-        <div id="clock" class="clock">--:--</div>
-        <div id="marketStatus" class="market-status">Loading market status</div>
-      </div>
-
-      <button id="refreshBtn" class="refresh-btn">
-        Refresh
-      </button>
-    </div>
-
-  </div>
-</header>
-
-<main class="container main-layout">
-
-  <section id="loadingState" class="loading-state">
-    <div class="spinner"></div>
-    <p class="loading-title">Scanning market conditions...</p>
-    <p id="loadingStep" class="loading-step">Initialising engine</p>
-  </section>
-
-  <section id="errorState" class="hidden error-state">
-    <div class="error-card">
-      <p class="error-title">Unable to load market data</p>
-      <p class="error-copy">
-        The data provider may be temporarily unavailable.
-      </p>
-
-      <button onclick="runApp()" class="retry-btn">
-        Retry
-      </button>
-    </div>
-  </section>
-
-  <section id="appState" class="hidden">
-
-    <section id="demoBanner" class="hidden demo-banner">
-      <div>
-        <div class="demo-title">Simulation Mode</div>
-        <div class="demo-copy">
-          Live market data is currently unavailable. Numbers shown below are simulated for interface testing only.
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="topbar-left">
+        <div class="brand">
+          <div class="brand-title">StockLens</div>
+          <div class="brand-subtitle">Market dashboard (daily data, not real-time)</div>
         </div>
       </div>
+
+      <div class="topbar-right">
+        <div id="apiStatus" class="status-pill pill-warm">Loading</div>
+
+        <div class="time-wrap">
+          <div id="clock" class="clock">--:--</div>
+          <div id="marketStatus" class="market-status">--</div>
+        </div>
+
+        <button id="refreshBtn" class="refresh-btn" type="button">Refresh</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container main-layout">
+    <section id="loadingState" class="loading-state">
+      <div class="spinner"></div>
+      <p class="loading-title">Computing signals</p>
+      <p id="loadingStep" class="loading-step">Initialising</p>
     </section>
 
-    <section id="heroSector"></section>
-
-    <section id="tradeCard"></section>
-
-    <section id="sectorTable"></section>
-
-    <section class="card disclaimer-card">
-      <div class="eyebrow">Important</div>
-
-      <p class="disclaimer-copy">
-        StockLens is an educational market dashboard. It does not provide personalised financial advice.
-        All trade levels shown are algorithmic estimates derived from trend, volatility, and momentum calculations.
-        Markets are unpredictable and capital loss is possible.
-      </p>
+    <section id="errorState" class="hidden error-state">
+      <div class="error-card">
+        <p class="error-title">Unable to load market data</p>
+        <p class="error-copy">
+          Data sources may be unavailable, rate-limited, or blocked by CORS proxy failures.
+        </p>
+        <button class="retry-btn" type="button" onclick="runApp()">Retry</button>
+      </div>
     </section>
 
-    <section class="json-section">
-      <details>
-        <summary class="json-summary">
-          <span>Raw Calculation Data</span>
-          <span class="summary-hint">Expand</span>
-        </summary>
+    <section id="appState" class="hidden">
+      <section id="heroSector"></section>
+      <section id="tradeCard"></section>
+      <section id="sectorTable"></section>
 
-        <pre id="jsonBlock" class="json-block"></pre>
-      </details>
+      <section class="card disclaimer-card">
+        <div class="eyebrow">Important</div>
+        <p class="disclaimer-copy">
+          This dashboard is educational and uses delayed daily bars. It is not financial advice.
+          Outputs are model-driven and can be wrong. Markets are unpredictable and loss is possible.
+        </p>
+      </section>
+
+      <section class="json-section">
+        <details>
+          <summary class="json-summary">
+            <span>Raw model output</span>
+            <span class="summary-hint">Expand</span>
+          </summary>
+          <pre id="jsonBlock" class="json-block"></pre>
+        </details>
+      </section>
     </section>
+  </main>
 
-  </section>
-
-</main>
-
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
