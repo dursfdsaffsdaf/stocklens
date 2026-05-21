@@ -1,4 +1,4 @@
-const API_KEY = lGbZF4GmiStsHo3O6p8y1VQNDKihLChQ;
+const API_KEY = 'lGbZF4GmiStsHo3O6p8y1VQNDKihLChQ';
     });
 
     const winner = analysedStocks[0];
