@@ -1,48 +1,38 @@
-// ===============================
-// STOCKLENS - COMPLETE app.js
-// ===============================
+// ======================================
+// STOCKLENS - FINAL WORKING app.js
+// ======================================
+
+const API_KEY = '50OQ2U1UED3SZFOB';
 
 const SECTORS = {
   XLK: {
     name: 'Technology',
     emoji: '💻',
-    stocks: ['MSFT', 'NVDA', 'AVGO', 'AAPL']
+    stocks: ['MSFT', 'NVDA', 'AAPL']
   },
 
   XLF: {
     name: 'Financials',
     emoji: '🏦',
-    stocks: ['JPM', 'V', 'MA', 'BRK-B']
+    stocks: ['JPM', 'V', 'MA']
   },
 
   XLE: {
     name: 'Energy',
     emoji: '⚡',
-    stocks: ['XOM', 'CVX', 'COP', 'SLB']
-  },
-
-  XLI: {
-    name: 'Industrials',
-    emoji: '🏭',
-    stocks: ['CAT', 'GE', 'HON', 'DE']
+    stocks: ['XOM', 'CVX']
   },
 
   XLV: {
     name: 'Healthcare',
     emoji: '🏥',
-    stocks: ['LLY', 'JNJ', 'ABBV', 'PFE']
-  },
-
-  XLP: {
-    name: 'Consumer Staples',
-    emoji: '🛒',
-    stocks: ['PG', 'KO', 'PEP', 'COST']
+    stocks: ['LLY', 'JNJ']
   }
 };
 
-// ===============================
+// ======================================
 // UI HELPERS
-// ===============================
+// ======================================
 
 function setLoadingStep(text) {
   document.getElementById('loadingStep').textContent = text;
@@ -63,9 +53,9 @@ function showState(state) {
     .classList.toggle('hidden', state !== 'error');
 }
 
-// ===============================
+// ======================================
 // CLOCK
-// ===============================
+// ======================================
 
 function updateClock() {
 
@@ -77,49 +67,31 @@ function updateClock() {
       minute: '2-digit'
     });
 
-  const ny = new Date(
-    now.toLocaleString('en-US', {
-      timeZone: 'America/New_York'
-    })
-  );
-
-  const mins =
-    ny.getHours() * 60 + ny.getMinutes();
-
-  const day = ny.getDay();
-
-  let status = 'US Market Closed';
-
-  if (day !== 0 && day !== 6) {
-
-    if (mins >= 570 && mins < 960) {
-      status = 'US Market Open';
-    }
-  }
-
   document.getElementById('marketStatus').textContent =
-    status;
+    'US Market';
 }
 
 setInterval(updateClock, 1000);
+
 updateClock();
 
-// ===============================
-// ALPHA VANTAGE
-// FREE DEMO KEY
-// ===============================
+// ======================================
+// API
+// ======================================
 
 async function getHistory(symbol) {
 
   const url =
-    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=compact&apikey=demo`;
+    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=compact&apikey=${API_KEY}`;
 
   const res = await fetch(url);
 
   const data = await res.json();
 
+  console.log(symbol, data);
+
   if (!data['Time Series (Daily)']) {
-    throw new Error('API limit reached');
+    throw new Error(`No data for ${symbol}`);
   }
 
   const series = data['Time Series (Daily)'];
@@ -134,7 +106,8 @@ async function getHistory(symbol) {
 
 async function getQuote(symbol) {
 
-  const history = await getHistory(symbol);
+  const history =
+    await getHistory(symbol);
 
   const currentPrice =
     history[history.length - 1];
@@ -150,36 +123,18 @@ async function getQuote(symbol) {
   };
 }
 
-// ===============================
+// ======================================
 // MATH
-// ===============================
+// ======================================
 
 function movingAverage(arr, period) {
 
-  const slice = arr.slice(-period);
+  const slice =
+    arr.slice(-period);
 
   return (
-    slice.reduce((a, b) => a + b, 0) /
-    slice.length
-  );
-}
-
-function calcATR(history, period = 14) {
-
-  const ranges = [];
-
-  for (let i = 1; i < history.length; i++) {
-
-    ranges.push(
-      Math.abs(history[i] - history[i - 1])
-    );
-  }
-
-  const slice = ranges.slice(-period);
-
-  return (
-    slice.reduce((a, b) => a + b, 0) /
-    slice.length
+    slice.reduce((a, b) => a + b, 0)
+    / slice.length
   );
 }
 
@@ -196,18 +151,55 @@ function calcMomentum(history, days) {
   );
 }
 
-function scoreSector(m5, m20, vol) {
+function calcATR(history) {
+
+  const ranges = [];
+
+  for (let i = 1; i < history.length; i++) {
+
+    ranges.push(
+      Math.abs(history[i] - history[i - 1])
+    );
+  }
 
   return (
-    m5 * 0.45 +
-    m20 * 0.45 -
-    vol * 0.1
+    ranges.reduce((a, b) => a + b, 0)
+    / ranges.length
   );
 }
 
-// ===============================
-// TRADE MODEL
-// ===============================
+// ======================================
+// ANALYSIS
+// ======================================
+
+async function analyseSector(symbol) {
+
+  const history =
+    await getHistory(symbol);
+
+  const momentum5 =
+    calcMomentum(history, 5);
+
+  const momentum20 =
+    calcMomentum(history, 20);
+
+  const volatility =
+    calcATR(history);
+
+  const score =
+    momentum5 +
+    momentum20 -
+    volatility * 0.1;
+
+  return {
+    symbol,
+    history,
+    momentum5,
+    momentum20,
+    volatility,
+    score
+  };
+}
 
 function buildTradeModel(stock) {
 
@@ -223,52 +215,29 @@ function buildTradeModel(stock) {
   const stop =
     entry - atr * 1.2;
 
-  const risk =
-    entry - stop;
-
-  const target1 =
+  const exit =
     stock.currentPrice * 1.18;
 
-  const target2 =
-    stock.yearHigh * 0.985;
-
-  const exit =
-    Math.max(target1, target2);
-
-  const reward =
-    exit - entry;
-
   const rr =
-    reward / risk;
-
-  let confidence = 'Medium';
-
-  if (rr >= 2.5) {
-    confidence = 'High';
-  }
-
-  if (rr < 1.8) {
-    confidence = 'Low';
-  }
+    (exit - entry) /
+    (entry - stop);
 
   return {
-    ma20,
-    atr,
     entry,
     stop,
     exit,
-    rr,
-    confidence
+    rr
   };
 }
 
-// ===============================
+// ======================================
 // RENDER
-// ===============================
+// ======================================
 
 function renderHero(sectorKey, perf) {
 
-  const sec = SECTORS[sectorKey];
+  const sec =
+    SECTORS[sectorKey];
 
   document.getElementById('heroSector').innerHTML = `
 
@@ -284,12 +253,8 @@ function renderHero(sectorKey, perf) {
           ${sec.emoji} ${sec.name}
         </div>
 
-        <div class="
-          hero-performance
-          ${perf >= 0 ? 'green' : 'red'}
-        ">
-          ${perf >= 0 ? '+' : ''}
-          ${perf.toFixed(2)}%
+        <div class="hero-performance green">
+          +${perf.toFixed(2)}%
         </div>
 
       </div>
@@ -305,7 +270,7 @@ function renderTrade(stock, model) {
     <div class="card trade-card">
 
       <div class="eyebrow">
-        Primary Trade Setup
+        Active Trade Recommendation
       </div>
 
       <div class="trade-header">
@@ -378,16 +343,6 @@ function renderTrade(stock, model) {
           </div>
         </div>
 
-        <div class="metric-box">
-          <div class="metric-label">
-            Confidence
-          </div>
-
-          <div class="metric-value amber">
-            ${model.confidence}
-          </div>
-        </div>
-
       </div>
 
     </div>
@@ -396,129 +351,45 @@ function renderTrade(stock, model) {
 
 function renderSectorTable(ranked) {
 
-  const max =
-    Math.max(
-      ...ranked.map(x => Math.abs(x.score))
-    );
-
   document.getElementById('sectorTable').innerHTML = `
 
     <div class="card table-card">
 
       <div class="eyebrow">
-        Sector Momentum Ranking
+        Sector Rankings
       </div>
 
-      ${ranked.map((item, index) => {
+      ${ranked.map((item, index) => `
 
-        const width =
-          (Math.abs(item.score) / max) * 100;
+        <div class="table-row">
 
-        return `
-
-          <div class="table-row">
-
-            <div>
-              ${index + 1}
-            </div>
-
-            <div style="width:40px;">
-              ${SECTORS[item.symbol].emoji}
-            </div>
-
-            <div style="width:180px;">
-              ${SECTORS[item.symbol].name}
-            </div>
-
-            <div class="bar-wrap">
-
-              <div
-                class="bar"
-                style="
-                  width:${width}%;
-                  background:
-                  ${item.score >= 0
-                    ? 'var(--green)'
-                    : 'var(--red)'};
-                ">
-              </div>
-
-            </div>
-
-            <div style="
-              width:80px;
-              text-align:right;
-            ">
-              ${item.score.toFixed(2)}
-            </div>
-
+          <div>
+            ${index + 1}
           </div>
-        `;
-      }).join('')}
+
+          <div style="width:40px;">
+            ${SECTORS[item.symbol].emoji}
+          </div>
+
+          <div style="width:180px;">
+            ${SECTORS[item.symbol].name}
+          </div>
+
+          <div style="margin-left:auto;">
+            ${item.score.toFixed(2)}
+          </div>
+
+        </div>
+
+      `).join('')}
 
     </div>
   `;
 }
 
-// ===============================
-// ANALYSIS
-// ===============================
-
-async function analyseSector(etf) {
-
-  const quote =
-    await getQuote(etf);
-
-  const history =
-    await getHistory(etf);
-
-  const momentum5 =
-    calcMomentum(history, 5);
-
-  const momentum20 =
-    calcMomentum(history, 20);
-
-  const volatility =
-    calcATR(history);
-
-  const score =
-    scoreSector(
-      momentum5,
-      momentum20,
-      volatility
-    );
-
-  return {
-    symbol: etf,
-    quote,
-    history,
-    momentum5,
-    momentum20,
-    volatility,
-    score
-  };
-}
-
-async function buildStockData(symbol) {
-
-  const quote =
-    await getQuote(symbol);
-
-  const history =
-    await getHistory(symbol);
-
-  return {
-    symbol: quote.symbol,
-    name: quote.name,
-    currentPrice: quote.price,
-    yearHigh: quote.yearHigh,
-    history
-  };
-}
-
-// ===============================
+// ======================================
 // MAIN
-// ===============================
+// ======================================
 
 async function runApp() {
 
@@ -532,34 +403,43 @@ async function runApp() {
 
     const sectorResults = [];
 
-    for (const etf of Object.keys(SECTORS)) {
+    for (const sector of Object.keys(SECTORS)) {
 
-      const data =
-        await analyseSector(etf);
+      const result =
+        await analyseSector(sector);
 
-      sectorResults.push(data);
+      sectorResults.push(result);
     }
 
     sectorResults.sort(
       (a, b) => b.score - a.score
     );
 
-    const winnerSector =
+    const winningSector =
       sectorResults[0];
 
     setLoadingStep(
-      'Analysing blue-chip leaders'
+      'Selecting strongest blue-chip stock'
     );
 
-    const stocks =
-      SECTORS[winnerSector.symbol].stocks;
+    const stockSymbols =
+      SECTORS[winningSector.symbol].stocks;
 
     const analysedStocks = [];
 
-    for (const symbol of stocks) {
+    for (const symbol of stockSymbols) {
 
-      const stock =
-        await buildStockData(symbol);
+      const quote =
+        await getQuote(symbol);
+
+      const history =
+        await getHistory(symbol);
+
+      const stock = {
+        ...quote,
+        currentPrice: quote.price,
+        history
+      };
 
       const model =
         buildTradeModel(stock);
@@ -570,23 +450,16 @@ async function runApp() {
       });
     }
 
-    analysedStocks.sort((a, b) => {
-
-      const scoreA =
-        a.model.rr;
-
-      const scoreB =
-        b.model.rr;
-
-      return scoreB - scoreA;
-    });
+    analysedStocks.sort((a, b) =>
+      b.model.rr - a.model.rr
+    );
 
     const winner =
       analysedStocks[0];
 
     renderHero(
-      winnerSector.symbol,
-      winnerSector.momentum5
+      winningSector.symbol,
+      winningSector.momentum5
     );
 
     renderTrade(
@@ -606,14 +479,8 @@ async function runApp() {
         generatedAt:
           new Date().toISOString(),
 
-        sectorRanking:
-          sectorResults.map(x => ({
-            symbol: x.symbol,
-            score: x.score,
-            momentum5: x.momentum5,
-            momentum20: x.momentum20,
-            volatility: x.volatility
-          })),
+        winningSector:
+          winningSector.symbol,
 
         recommendation: {
           stock: winner.stock,
