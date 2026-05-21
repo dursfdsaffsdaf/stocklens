@@ -1,4 +1,4 @@
-const API_KEY = 'PASTE_YOUR_API_KEY_HERE';
+const API_KEY = 'lGbZF4GmiStsHo3O6p8y1VQNDKihLChQ';
 
 const API_BASE = 'https://financialmodelingprep.com/stable';
 
