@@ -97,9 +97,11 @@ async function fetchJSON(url) {
 async function getQuote(symbol) {
 
   const url =
-    `${API_BASE}/quote?symbol=${symbol}&apikey=${API_KEY}`;
+    `https://financialmodelingprep.com/api/v3/quote/${symbol}?apikey=${API_KEY}`;
 
-  const data = await fetchJSON(url);
+  const res = await fetch(url);
+
+  const data = await res.json();
 
   return data[0];
 }
@@ -107,11 +109,13 @@ async function getQuote(symbol) {
 async function getHistory(symbol) {
 
   const url =
-    `${API_BASE}/historical-price-eod/full?symbol=${symbol}&timeseries=60&apikey=${API_KEY}`;
+    `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?timeseries=60&apikey=${API_KEY}`;
 
-  const data = await fetchJSON(url);
+  const res = await fetch(url);
 
-  return data
+  const data = await res.json();
+
+  return data.historical
     .map(d => d.close)
     .reverse();
 }
