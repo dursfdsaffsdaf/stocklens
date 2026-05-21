@@ -1,7 +1,3 @@
-const API_KEY = 'lGbZF4GmiStsHo3O6p8y1VQNDKihLChQ';
-
-const API_BASE = 'https://financialmodelingprep.com/stable';
-
 const SECTORS = {
   XLK: {
     name: 'Technology',
@@ -96,28 +92,35 @@ async function fetchJSON(url) {
 
 async function getQuote(symbol) {
 
-  const url =
-    `https://financialmodelingprep.com/api/v3/quote/${symbol}?apikey=${API_KEY}`;
+  const history = await getHistory(symbol);
 
-  const res = await fetch(url);
+  const currentPrice =
+    history[history.length - 1];
 
-  const data = await res.json();
+  const yearHigh =
+    Math.max(...history);
 
-  return data[0];
+  return {
+    symbol,
+    name: symbol,
+    price: currentPrice,
+    yearHigh
+  };
 }
 
 async function getHistory(symbol) {
 
   const url =
-    `https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?timeseries=60&apikey=${API_KEY}`;
+    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
 
   const res = await fetch(url);
 
   const data = await res.json();
 
-  return data.historical
-    .map(d => d.close)
-    .reverse();
+  const closes =
+    data.chart.result[0].indicators.quote[0].close;
+
+  return closes.filter(v => v !== null);
 }
 
 function movingAverage(arr, period) {
