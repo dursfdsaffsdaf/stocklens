@@ -1,17 +1,33 @@
 // ======================================
 // STOCKLENS — app.js
-// Primary:  Polygon.io (free tier)
+// Primary: Financial Modeling Prep (FMP)
+// Backup:  Polygon.io
 // Fallback: Yahoo Finance (CORS proxy)
 // ======================================
 //
-// SETUP — Polygon.io (takes ~2 minutes)
-//   1. Go to https://polygon.io and sign up (free, no card)
-//   2. Your API key appears on the dashboard immediately
-//   3. Paste it below, replacing YOUR_POLYGON_API_KEY
+// SECURITY NOTE:
+// This is a client-side app. Any API key hardcoded here will be exposed to anyone who loads the site.
+// If you commit this to a public repo, assume the keys are compromised.
+//
 // ======================================
 
-const POLYGON_KEY = 'NSas3vD1pTpPUnRh7BOPayKIMWdRGMFG';
+// --- API KEYS (ordered; first working key wins) ---
+const FMP_KEYS = [
+  'lGbZF4GmiStsHo3O6p8y1VQNDKihLChQ',
+];
 
+const POLYGON_KEYS = [
+  'NSas3vD1pTpPUnRh7BOPayKIMWdRGMFG',
+];
+
+// --- Provider timeouts (ms) ---
+const PROVIDER_TIMEOUT_MS = {
+  FMP: 6500,
+  POLYGON: 8000,
+  YAHOO: 8000,
+};
+
+// --- Universe ---
 const SECTORS = {
   MSFT: {
     name: 'Technology',
@@ -38,99 +54,193 @@ const SECTORS = {
 // ======================================
 // UI HELPERS
 // ======================================
-
 function setLoadingStep(text) {
   document.getElementById('loadingStep').textContent = text;
 }
 
 function showState(state) {
-  document
-    .getElementById('loadingState')
-    .classList.toggle('hidden', state !== 'loading');
-
-  document
-    .getElementById('appState')
-    .classList.toggle('hidden', state !== 'app');
-
-  document
-    .getElementById('errorState')
-    .classList.toggle('hidden', state !== 'error');
+  document.getElementById('loadingState').classList.toggle('hidden', state !== 'loading');
+  document.getElementById('appState').classList.toggle('hidden', state !== 'app');
+  document.getElementById('errorState').classList.toggle('hidden', state !== 'error');
 }
 
 // ======================================
 // CLOCK
 // ======================================
-
 function updateClock() {
   const now = new Date();
-
   document.getElementById('clock').textContent =
     now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-  document.getElementById('marketStatus').textContent =
-    'US Market';
+  document.getElementById('marketStatus').textContent = 'US Market';
 }
-
 setInterval(updateClock, 1000);
 updateClock();
 
 // ======================================
 // DATA SOURCE TRACKING
 // ======================================
-
 const sourceLog = {};
 
 // ======================================
-// API — PRIMARY: Polygon.io
+// FETCH HELPERS
 // ======================================
+function withTimeout(ms) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cancel: () => clearTimeout(id) };
+}
 
-async function getHistoryPolygon(symbol) {
-  const toDate   = new Date();
-  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+async function fetchJson(url, timeoutMs) {
+  const t = withTimeout(timeoutMs);
+  try {
+    const res = await fetch(url, { signal: t.signal });
+    const text = await res.text();
 
-  const to   = toDate.toISOString().split('T')[0];
-  const from = fromDate.toISOString().split('T')[0];
+    // Some proxies/providers return HTML or empty response on failure.
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (_) {
+      data = null;
+    }
 
-  const url =
-    `https://api.polygon.io/v2/aggs/ticker/${symbol}/range/1/day/${from}/${to}` +
-    `?adjusted=true&sort=asc&limit=90&apiKey=${POLYGON_KEY}`;
-
-  const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  const data = await res.json();
-
-  // FIX: Polygon free plan returns "DELAYED" instead of "OK".
-  // Both statuses include valid price data — accept either.
-  const validStatus = data.status === 'OK' || data.status === 'DELAYED';
-
-  if (res.status === 429 || !validStatus || !data.results?.length) {
-    throw new Error(`Polygon unavailable for ${symbol} (${data.status ?? res.status})`);
+    return { res, data, rawText: text };
+  } finally {
+    t.cancel();
   }
+}
 
-  return data.results.map(bar => bar.c);
+function normalizeCloses(closes) {
+  if (!Array.isArray(closes)) return [];
+  return closes
+    .map(v => (typeof v === 'string' ? Number(v) : v))
+    .filter(v => v != null && isFinite(v) && v > 0);
 }
 
 // ======================================
-// API — FALLBACK: Yahoo Finance
+// API — PRIMARY: Financial Modeling Prep (FMP)
 // ======================================
+//
+// Endpoint style (daily):
+// /api/v3/historical-price-full/{symbol}?serietype=line&apikey=...
+//
+async function getHistoryFMP(symbol) {
+  const urlBase = `https://financialmodelingprep.com/api/v3/historical-price-full/${encodeURIComponent(symbol)}?serietype=line`;
 
+  let lastErr = null;
+
+  for (const key of FMP_KEYS) {
+    const url = `${urlBase}&apikey=${encodeURIComponent(key)}`;
+
+    try {
+      const { res, data } = await fetchJson(url, PROVIDER_TIMEOUT_MS.FMP);
+
+      if (!res.ok || !data || !Array.isArray(data.historical) || data.historical.length < 30) {
+        lastErr = new Error(`FMP bad response for ${symbol} (HTTP ${res.status})`);
+        continue;
+      }
+
+      // FMP often returns newest-first. Sort to oldest-first for consistency.
+      const sorted = data.historical
+        .filter(r => r && r.date && (r.close != null))
+        .slice(0, 2000) // safety cap
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
+      const closes = normalizeCloses(sorted.map(r => r.close));
+
+      // keep last ~90 trading closes
+      const trimmed = closes.slice(-90);
+
+      if (trimmed.length < 30) {
+        lastErr = new Error(`FMP insufficient data for ${symbol}`);
+        continue;
+      }
+
+      sourceLog[symbol] = `Financial Modeling Prep (primary)`;
+      return trimmed;
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
+  }
+
+  throw lastErr ?? new Error(`FMP failed for ${symbol}`);
+}
+
+// ======================================
+// API — BACKUP: Polygon.io
+// ======================================
+//
+// Endpoint: /v2/aggs/ticker/{symbol}/range/1/day/{from}/{to}?adjusted=true&sort=asc&limit=90&apiKey=...
+//
+async function getHistoryPolygon(symbol) {
+  const toDate = new Date();
+  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+  const to = toDate.toISOString().split('T')[0];
+  const from = fromDate.toISOString().split('T')[0];
+
+  let lastErr = null;
+
+  for (const key of POLYGON_KEYS) {
+    const url =
+      `https://api.polygon.io/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${from}/${to}` +
+      `?adjusted=true&sort=asc&limit=90&apiKey=${encodeURIComponent(key)}`;
+
+    try {
+      const { res, data } = await fetchJson(url, PROVIDER_TIMEOUT_MS.POLYGON);
+
+      if (
+        res.status === 429 ||
+        !res.ok ||
+        !data ||
+        data.status !== 'OK' ||
+        !Array.isArray(data.results) ||
+        data.results.length < 30
+      ) {
+        lastErr = new Error(`Polygon unavailable for ${symbol} (${data?.status ?? res.status})`);
+        continue;
+      }
+
+      const closes = normalizeCloses(data.results.map(bar => bar.c));
+      if (closes.length < 30) {
+        lastErr = new Error(`Polygon insufficient data for ${symbol}`);
+        continue;
+      }
+
+      sourceLog[symbol] = `Polygon.io (backup)`;
+      return closes;
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
+  }
+
+  throw lastErr ?? new Error(`Polygon failed for ${symbol}`);
+}
+
+// ======================================
+// API — FINAL FALLBACK: Yahoo Finance (CORS proxy)
+// ======================================
 const YAHOO_PROXIES = [
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
 ];
 
 async function getHistoryYahoo(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d`;
 
   for (const makeProxy of YAHOO_PROXIES) {
     try {
-      const res  = await fetch(makeProxy(url), { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) continue;
+      const { res, data } = await fetchJson(makeProxy(url), PROVIDER_TIMEOUT_MS.YAHOO);
+      if (!res.ok || !data) continue;
 
-      const data   = await res.json();
       const closes = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+      const cleaned = normalizeCloses(closes);
 
-      if (closes?.length) {
-        return closes.filter(c => c != null && isFinite(c));
+      if (cleaned.length >= 30) {
+        sourceLog[symbol] = `Yahoo Finance (final fallback)`;
+        return cleaned;
       }
     } catch (_) {
       // try next proxy
@@ -141,31 +251,29 @@ async function getHistoryYahoo(symbol) {
 }
 
 // ======================================
-// API — getHistory (with fallback)
+// API — getHistory (priority: FMP -> Polygon -> Yahoo)
 // ======================================
-
 async function getHistory(symbol) {
   try {
-    const closes = await getHistoryPolygon(symbol);
-    sourceLog[symbol] = 'Polygon.io';
-    return closes;
-  } catch (polygonErr) {
-    console.warn(`Polygon failed for ${symbol} — trying Yahoo:`, polygonErr.message);
-    const closes = await getHistoryYahoo(symbol);
-    sourceLog[symbol] = 'Yahoo Finance (fallback)';
-    return closes;
+    return await getHistoryFMP(symbol);
+  } catch (fmpErr) {
+    console.warn(`FMP failed for ${symbol} — trying Polygon.io:`, fmpErr.message);
+    try {
+      return await getHistoryPolygon(symbol);
+    } catch (polygonErr) {
+      console.warn(`Polygon failed for ${symbol} — trying Yahoo Finance:`, polygonErr.message);
+      return await getHistoryYahoo(symbol);
+    }
   }
 }
 
 // ======================================
 // API — getQuote
 // ======================================
-
 async function getQuote(symbol) {
-  const history      = await getHistory(symbol);
+  const history = await getHistory(symbol);
   const currentPrice = history[history.length - 1];
-  const yearHigh     = Math.max(...history);
-
+  const yearHigh = Math.max(...history);
   return {
     symbol,
     name: symbol,
@@ -178,15 +286,16 @@ async function getQuote(symbol) {
 // ======================================
 // MATH
 // ======================================
-
 function movingAverage(arr, period) {
   const slice = arr.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
+  return slice.reduce((a, b) => a + b, 0) / Math.max(1, slice.length);
 }
 
 function calcMomentum(history, days) {
-  const latest   = history[history.length - 1];
+  if (history.length <= days) return 0;
+  const latest = history[history.length - 1];
   const previous = history[history.length - 1 - days];
+  if (!isFinite(previous) || previous === 0) return 0;
   return ((latest - previous) / previous) * 100;
 }
 
@@ -195,41 +304,36 @@ function calcATR(history) {
   for (let i = 1; i < history.length; i++) {
     ranges.push(Math.abs(history[i] - history[i - 1]));
   }
-  return ranges.reduce((a, b) => a + b, 0) / ranges.length;
+  return ranges.reduce((a, b) => a + b, 0) / Math.max(1, ranges.length);
 }
 
 // ======================================
 // ANALYSIS
 // ======================================
-
 async function analyseSector(symbol) {
-  const history    = await getHistory(symbol);
-  const momentum5  = calcMomentum(history, 5);
+  const history = await getHistory(symbol);
+  const momentum5 = calcMomentum(history, 5);
   const momentum20 = calcMomentum(history, 20);
   const volatility = calcATR(history);
-  const score      = momentum5 + momentum20 - volatility * 0.1;
-
+  const score = momentum5 + momentum20 - volatility * 0.1;
   return { symbol, history, momentum5, momentum20, volatility, score };
 }
 
 function buildTradeModel(stock) {
-  const ma20  = movingAverage(stock.history, 20);
-  const atr   = calcATR(stock.history);
+  const ma20 = movingAverage(stock.history, 20);
+  const atr = calcATR(stock.history);
   const entry = ma20 - atr * 0.8;
-  const stop  = entry - atr * 1.2;
-  const exit  = stock.currentPrice * 1.18;
-  const rr    = (exit - entry) / (entry - stop);
-
+  const stop = entry - atr * 1.2;
+  const exit = stock.currentPrice * 1.18;
+  const rr = (exit - entry) / Math.max(1e-9, (entry - stop));
   return { entry, stop, exit, rr };
 }
 
 // ======================================
 // RENDER
 // ======================================
-
 function renderHero(sectorKey, perf) {
   const sec = SECTORS[sectorKey];
-
   document.getElementById('heroSector').innerHTML = `
     <div class="card hero-card">
       <div class="eyebrow">
@@ -314,63 +418,36 @@ function renderSectorTable(ranked) {
 // ======================================
 // MAIN
 // ======================================
-
 async function runApp() {
   try {
     showState('loading');
-    Object.keys(sourceLog).forEach(k => delete sourceLog[k]);
+    Object.keys(sourceLog).forEach(k => delete sourceLog[k]); // reset log
 
     // ── Step 1: Score each sector ────────────────────────────
-    // FIX: each sector is wrapped in its own try/catch.
-    // If a symbol fails both Polygon and Yahoo, it is skipped
-    // and the remaining sectors are still ranked normally.
     setLoadingStep('Analysing sector momentum');
-
     const sectorResults = [];
-
     for (const sector of Object.keys(SECTORS)) {
-      try {
-        const result = await analyseSector(sector);
-        sectorResults.push(result);
-      } catch (err) {
-        console.warn(`Skipping sector ${sector} — both data sources failed:`, err.message);
-      }
-    }
-
-    if (!sectorResults.length) {
-      throw new Error('All sector data sources failed. Check your connection and try again.');
+      const result = await analyseSector(sector);
+      sectorResults.push(result);
     }
 
     sectorResults.sort((a, b) => b.score - a.score);
     const winningSector = sectorResults[0];
 
     // ── Step 2: Analyse stocks in the winning sector ─────────
-    // FIX: same per-symbol try/catch — a stock that can't be
-    // fetched is skipped rather than crashing the whole app.
     setLoadingStep('Selecting strongest blue-chip stock');
-
-    const stockSymbols   = SECTORS[winningSector.symbol].stocks;
+    const stockSymbols = SECTORS[winningSector.symbol].stocks;
     const analysedStocks = [];
 
     for (const symbol of stockSymbols) {
-      try {
-        const quote = await getQuote(symbol);
-
-        const stock = {
-          ...quote,
-          currentPrice: quote.price,
-          history:      quote.history,
-        };
-
-        const model = buildTradeModel(stock);
-        analysedStocks.push({ stock, model });
-      } catch (err) {
-        console.warn(`Skipping stock ${symbol} — both data sources failed:`, err.message);
-      }
-    }
-
-    if (!analysedStocks.length) {
-      throw new Error('Could not load any stocks in the leading sector. Try again shortly.');
+      const quote = await getQuote(symbol);
+      const stock = {
+        ...quote,
+        currentPrice: quote.price,
+        history: quote.history,
+      };
+      const model = buildTradeModel(stock);
+      analysedStocks.push({ stock, model });
     }
 
     analysedStocks.sort((a, b) => b.model.rr - a.model.rr);
@@ -381,6 +458,7 @@ async function runApp() {
     renderTrade(winner.stock, winner.model);
     renderSectorTable(sectorResults);
 
+    // Summarise which source each symbol actually came from
     const sourceSummary = {};
     Object.entries(sourceLog).forEach(([sym, src]) => {
       sourceSummary[src] = sourceSummary[src] ?? [];
@@ -389,8 +467,8 @@ async function runApp() {
 
     document.getElementById('jsonBlock').textContent =
       JSON.stringify({
-        generatedAt:   new Date().toISOString(),
-        dataSources:   sourceSummary,
+        generatedAt: new Date().toISOString(),
+        dataSources: sourceSummary,
         winningSector: winningSector.symbol,
         recommendation: {
           stock: winner.stock,
@@ -399,10 +477,8 @@ async function runApp() {
       }, null, 2);
 
     document.getElementById('apiStatus').textContent = 'Live Market Data';
-    document.getElementById('apiStatus').className   = 'status-pill pill-live';
-
+    document.getElementById('apiStatus').className = 'status-pill pill-live';
     showState('app');
-
   } catch (err) {
     console.error(err);
     showState('error');
@@ -410,7 +486,4 @@ async function runApp() {
 }
 
 runApp();
-
-document
-  .getElementById('refreshBtn')
-  .addEventListener('click', runApp);
+document.getElementById('refreshBtn').addEventListener('click', runApp);
