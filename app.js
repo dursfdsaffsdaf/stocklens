@@ -5,25 +5,25 @@
 const API_KEY = '50OQ2U1UED3SZFOB';
 
 const SECTORS = {
-  XLK: {
+  MSFT: {
     name: 'Technology',
     emoji: '💻',
     stocks: ['MSFT', 'NVDA', 'AAPL']
   },
 
-  XLF: {
+  JPM: {
     name: 'Financials',
     emoji: '🏦',
     stocks: ['JPM', 'V', 'MA']
   },
 
-  XLE: {
+  XOM: {
     name: 'Energy',
     emoji: '⚡',
     stocks: ['XOM', 'CVX']
   },
 
-  XLV: {
+  JNJ: {
     name: 'Healthcare',
     emoji: '🏥',
     stocks: ['LLY', 'JNJ']
