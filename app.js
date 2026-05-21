@@ -1,3 +1,7 @@
+// ===============================
+// STOCKLENS - COMPLETE app.js
+// ===============================
+
 const SECTORS = {
   XLK: {
     name: 'Technology',
@@ -26,7 +30,7 @@ const SECTORS = {
   XLV: {
     name: 'Healthcare',
     emoji: '🏥',
-    stocks: ['LLY', 'JNJ', 'ABBV', 'UNH']
+    stocks: ['LLY', 'JNJ', 'ABBV', 'PFE']
   },
 
   XLP: {
@@ -36,15 +40,32 @@ const SECTORS = {
   }
 };
 
+// ===============================
+// UI HELPERS
+// ===============================
+
 function setLoadingStep(text) {
   document.getElementById('loadingStep').textContent = text;
 }
 
 function showState(state) {
-  document.getElementById('loadingState').classList.toggle('hidden', state !== 'loading');
-  document.getElementById('appState').classList.toggle('hidden', state !== 'app');
-  document.getElementById('errorState').classList.toggle('hidden', state !== 'error');
+
+  document
+    .getElementById('loadingState')
+    .classList.toggle('hidden', state !== 'loading');
+
+  document
+    .getElementById('appState')
+    .classList.toggle('hidden', state !== 'app');
+
+  document
+    .getElementById('errorState')
+    .classList.toggle('hidden', state !== 'error');
 }
+
+// ===============================
+// CLOCK
+// ===============================
 
 function updateClock() {
 
@@ -56,38 +77,59 @@ function updateClock() {
       minute: '2-digit'
     });
 
-  const et = new Date(
-    new Date().toLocaleString('en-US', {
+  const ny = new Date(
+    now.toLocaleString('en-US', {
       timeZone: 'America/New_York'
     })
   );
 
-  const mins = et.getHours() * 60 + et.getMinutes();
-  const day = et.getDay();
+  const mins =
+    ny.getHours() * 60 + ny.getMinutes();
+
+  const day = ny.getDay();
 
   let status = 'US Market Closed';
 
   if (day !== 0 && day !== 6) {
+
     if (mins >= 570 && mins < 960) {
       status = 'US Market Open';
     }
   }
 
-  document.getElementById('marketStatus').textContent = status;
+  document.getElementById('marketStatus').textContent =
+    status;
 }
 
 setInterval(updateClock, 1000);
 updateClock();
 
-async function fetchJSON(url) {
+// ===============================
+// ALPHA VANTAGE
+// FREE DEMO KEY
+// ===============================
+
+async function getHistory(symbol) {
+
+  const url =
+    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=compact&apikey=demo`;
 
   const res = await fetch(url);
 
-  if (!res.ok) {
-    throw new Error('API failed');
+  const data = await res.json();
+
+  if (!data['Time Series (Daily)']) {
+    throw new Error('API limit reached');
   }
 
-  return await res.json();
+  const series = data['Time Series (Daily)'];
+
+  const closes =
+    Object.values(series)
+      .map(day => parseFloat(day['4. close']))
+      .reverse();
+
+  return closes.slice(-60);
 }
 
 async function getQuote(symbol) {
@@ -108,41 +150,18 @@ async function getQuote(symbol) {
   };
 }
 
-async function getHistory(symbol) {
-
-  const url =
-    `https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}.us&i=d`;
-
-  const proxy =
-    `https://corsproxy.io/?${encodeURIComponent(url)}`;
-
-  const res = await fetch(proxy);
-
-  const text = await res.text();
-
-  const lines = text.trim().split('\n');
-
-  const closes = [];
-
-  for (let i = 1; i < lines.length; i++) {
-
-    const cols = lines[i].split(',');
-
-    const close = parseFloat(cols[4]);
-
-    if (!isNaN(close)) {
-      closes.push(close);
-    }
-  }
-
-  return closes.slice(-60);
-}
+// ===============================
+// MATH
+// ===============================
 
 function movingAverage(arr, period) {
 
   const slice = arr.slice(-period);
 
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
+  return (
+    slice.reduce((a, b) => a + b, 0) /
+    slice.length
+  );
 }
 
 function calcATR(history, period = 14) {
@@ -150,61 +169,81 @@ function calcATR(history, period = 14) {
   const ranges = [];
 
   for (let i = 1; i < history.length; i++) {
-    ranges.push(Math.abs(history[i] - history[i - 1]));
+
+    ranges.push(
+      Math.abs(history[i] - history[i - 1])
+    );
   }
 
   const slice = ranges.slice(-period);
 
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
+  return (
+    slice.reduce((a, b) => a + b, 0) /
+    slice.length
+  );
 }
 
 function calcMomentum(history, days) {
 
-  const latest = history[history.length - 1];
-  const previous = history[history.length - 1 - days];
+  const latest =
+    history[history.length - 1];
 
-  return ((latest - previous) / previous) * 100;
-}
-
-function scoreSector(momentum5, momentum20, volatility) {
+  const previous =
+    history[history.length - 1 - days];
 
   return (
-    momentum5 * 0.45 +
-    momentum20 * 0.45 -
-    volatility * 0.10
+    ((latest - previous) / previous) * 100
   );
 }
+
+function scoreSector(m5, m20, vol) {
+
+  return (
+    m5 * 0.45 +
+    m20 * 0.45 -
+    vol * 0.1
+  );
+}
+
+// ===============================
+// TRADE MODEL
+// ===============================
 
 function buildTradeModel(stock) {
 
-  const ma20 = movingAverage(stock.history, 20);
+  const ma20 =
+    movingAverage(stock.history, 20);
 
-  const atr = calcATR(stock.history);
+  const atr =
+    calcATR(stock.history);
 
-  const entry = ma20 - atr * 0.8;
+  const entry =
+    ma20 - atr * 0.8;
 
-  const stop = entry - atr * 1.2;
+  const stop =
+    entry - atr * 1.2;
 
-  const risk = entry - stop;
+  const risk =
+    entry - stop;
 
-  const rewardTarget = stock.currentPrice * 1.18;
+  const target1 =
+    stock.currentPrice * 1.18;
 
-  const resistanceTarget = stock.yearHigh * 0.985;
+  const target2 =
+    stock.yearHigh * 0.985;
 
-  const exit = Math.max(
-    rewardTarget,
-    resistanceTarget
-  );
+  const exit =
+    Math.max(target1, target2);
 
-  const reward = exit - entry;
+  const reward =
+    exit - entry;
 
-  const rr = reward / risk;
+  const rr =
+    reward / risk;
 
-  let status = 'Wait for Pullback';
   let confidence = 'Medium';
 
-  if (stock.currentPrice <= entry * 1.02) {
-    status = 'Entry Zone Active';
+  if (rr >= 2.5) {
     confidence = 'High';
   }
 
@@ -219,16 +258,20 @@ function buildTradeModel(stock) {
     stop,
     exit,
     rr,
-    status,
     confidence
   };
 }
+
+// ===============================
+// RENDER
+// ===============================
 
 function renderHero(sectorKey, perf) {
 
   const sec = SECTORS[sectorKey];
 
   document.getElementById('heroSector').innerHTML = `
+
     <div class="card hero-card">
 
       <div class="eyebrow">
@@ -237,14 +280,16 @@ function renderHero(sectorKey, perf) {
 
       <div class="hero-row">
 
-        <div>
-          <div class="hero-title">
-            ${sec.emoji} ${sec.name}
-          </div>
+        <div class="hero-title">
+          ${sec.emoji} ${sec.name}
         </div>
 
-        <div class="hero-performance ${perf >= 0 ? 'green' : 'red'}">
-          ${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%
+        <div class="
+          hero-performance
+          ${perf >= 0 ? 'green' : 'red'}
+        ">
+          ${perf >= 0 ? '+' : ''}
+          ${perf.toFixed(2)}%
         </div>
 
       </div>
@@ -256,6 +301,7 @@ function renderHero(sectorKey, perf) {
 function renderTrade(stock, model) {
 
   document.getElementById('tradeCard').innerHTML = `
+
     <div class="card trade-card">
 
       <div class="eyebrow">
@@ -265,6 +311,7 @@ function renderTrade(stock, model) {
       <div class="trade-header">
 
         <div>
+
           <div class="trade-ticker">
             ${stock.symbol}
           </div>
@@ -272,16 +319,17 @@ function renderTrade(stock, model) {
           <div class="trade-company">
             ${stock.name}
           </div>
+
         </div>
 
-        <div class="price-block">
+        <div>
 
           <div class="current-price">
             $${stock.currentPrice.toFixed(2)}
           </div>
 
           <div class="trade-company">
-            Current Market Price
+            Current Price
           </div>
 
         </div>
@@ -291,35 +339,50 @@ function renderTrade(stock, model) {
       <div class="metrics-grid">
 
         <div class="metric-box">
-          <div class="metric-label">Buy Zone</div>
+          <div class="metric-label">
+            Buy Zone
+          </div>
+
           <div class="metric-value green">
             $${model.entry.toFixed(2)}
           </div>
         </div>
 
         <div class="metric-box">
-          <div class="metric-label">Profit Target</div>
+          <div class="metric-label">
+            Sell Target
+          </div>
+
           <div class="metric-value blue">
             $${model.exit.toFixed(2)}
           </div>
         </div>
 
         <div class="metric-box">
-          <div class="metric-label">Protection Level</div>
+          <div class="metric-label">
+            Protection Level
+          </div>
+
           <div class="metric-value red">
             $${model.stop.toFixed(2)}
           </div>
         </div>
 
         <div class="metric-box">
-          <div class="metric-label">Risk / Reward</div>
+          <div class="metric-label">
+            Risk / Reward
+          </div>
+
           <div class="metric-value">
             ${model.rr.toFixed(2)} : 1
           </div>
         </div>
 
         <div class="metric-box">
-          <div class="metric-label">Confidence</div>
+          <div class="metric-label">
+            Confidence
+          </div>
+
           <div class="metric-value amber">
             ${model.confidence}
           </div>
@@ -333,11 +396,13 @@ function renderTrade(stock, model) {
 
 function renderSectorTable(ranked) {
 
-  const max = Math.max(
-    ...ranked.map(x => Math.abs(x.score))
-  );
+  const max =
+    Math.max(
+      ...ranked.map(x => Math.abs(x.score))
+    );
 
   document.getElementById('sectorTable').innerHTML = `
+
     <div class="card table-card">
 
       <div class="eyebrow">
@@ -350,13 +415,14 @@ function renderSectorTable(ranked) {
           (Math.abs(item.score) / max) * 100;
 
         return `
+
           <div class="table-row">
 
             <div>
               ${index + 1}
             </div>
 
-            <div style="width:32px;font-size:24px;">
+            <div style="width:40px;">
               ${SECTORS[item.symbol].emoji}
             </div>
 
@@ -365,19 +431,23 @@ function renderSectorTable(ranked) {
             </div>
 
             <div class="bar-wrap">
+
               <div
                 class="bar"
                 style="
                   width:${width}%;
-                  background:${item.score >= 0 ? 'var(--green)' : 'var(--red)'};
+                  background:
+                  ${item.score >= 0
+                    ? 'var(--green)'
+                    : 'var(--red)'};
                 ">
               </div>
+
             </div>
 
             <div style="
-              width:90px;
+              width:80px;
               text-align:right;
-              font-family:var(--mono);
             ">
               ${item.score.toFixed(2)}
             </div>
@@ -390,23 +460,33 @@ function renderSectorTable(ranked) {
   `;
 }
 
+// ===============================
+// ANALYSIS
+// ===============================
+
 async function analyseSector(etf) {
 
-  const quote = await getQuote(etf);
+  const quote =
+    await getQuote(etf);
 
-  const history = await getHistory(etf);
+  const history =
+    await getHistory(etf);
 
-  const momentum5 = calcMomentum(history, 5);
+  const momentum5 =
+    calcMomentum(history, 5);
 
-  const momentum20 = calcMomentum(history, 20);
+  const momentum20 =
+    calcMomentum(history, 20);
 
-  const volatility = calcATR(history);
+  const volatility =
+    calcATR(history);
 
-  const score = scoreSector(
-    momentum5,
-    momentum20,
-    volatility
-  );
+  const score =
+    scoreSector(
+      momentum5,
+      momentum20,
+      volatility
+    );
 
   return {
     symbol: etf,
@@ -421,9 +501,11 @@ async function analyseSector(etf) {
 
 async function buildStockData(symbol) {
 
-  const quote = await getQuote(symbol);
+  const quote =
+    await getQuote(symbol);
 
-  const history = await getHistory(symbol);
+  const history =
+    await getHistory(symbol);
 
   return {
     symbol: quote.symbol,
@@ -434,41 +516,53 @@ async function buildStockData(symbol) {
   };
 }
 
+// ===============================
+// MAIN
+// ===============================
+
 async function runApp() {
 
   try {
 
     showState('loading');
 
-    setLoadingStep('Analysing sector momentum');
-
-    const sectorKeys = Object.keys(SECTORS);
+    setLoadingStep(
+      'Analysing sector momentum'
+    );
 
     const sectorResults = [];
 
-    for (const etf of sectorKeys) {
+    for (const etf of Object.keys(SECTORS)) {
 
-      const data = await analyseSector(etf);
+      const data =
+        await analyseSector(etf);
 
       sectorResults.push(data);
     }
 
-    sectorResults.sort((a, b) => b.score - a.score);
+    sectorResults.sort(
+      (a, b) => b.score - a.score
+    );
 
-    const winningSector = sectorResults[0];
+    const winnerSector =
+      sectorResults[0];
 
-    setLoadingStep('Analysing blue-chip leaders');
+    setLoadingStep(
+      'Analysing blue-chip leaders'
+    );
 
-    const stockUniverse =
-      SECTORS[winningSector.symbol].stocks;
+    const stocks =
+      SECTORS[winnerSector.symbol].stocks;
 
     const analysedStocks = [];
 
-    for (const symbol of stockUniverse) {
+    for (const symbol of stocks) {
 
-      const stock = await buildStockData(symbol);
+      const stock =
+        await buildStockData(symbol);
 
-      const model = buildTradeModel(stock);
+      const model =
+        buildTradeModel(stock);
 
       analysedStocks.push({
         stock,
@@ -478,26 +572,21 @@ async function runApp() {
 
     analysedStocks.sort((a, b) => {
 
-      const conf = {
-        High: 3,
-        Medium: 2,
-        Low: 1
-      };
-
       const scoreA =
-        conf[a.model.confidence] + a.model.rr;
+        a.model.rr;
 
       const scoreB =
-        conf[b.model.confidence] + b.model.rr;
+        b.model.rr;
 
       return scoreB - scoreA;
     });
 
-    const winner = analysedStocks[0];
+    const winner =
+      analysedStocks[0];
 
     renderHero(
-      winningSector.symbol,
-      winningSector.momentum5
+      winnerSector.symbol,
+      winnerSector.momentum5
     );
 
     renderTrade(
@@ -505,20 +594,26 @@ async function runApp() {
       winner.model
     );
 
-    renderSectorTable(sectorResults);
+    renderSectorTable(
+      sectorResults
+    );
 
-    document.getElementById('jsonBlock').textContent =
+    document.getElementById(
+      'jsonBlock'
+    ).textContent =
       JSON.stringify({
 
-        generatedAt: new Date().toISOString(),
+        generatedAt:
+          new Date().toISOString(),
 
-        sectorRanking: sectorResults.map(x => ({
-          symbol: x.symbol,
-          score: x.score,
-          momentum5: x.momentum5,
-          momentum20: x.momentum20,
-          volatility: x.volatility
-        })),
+        sectorRanking:
+          sectorResults.map(x => ({
+            symbol: x.symbol,
+            score: x.score,
+            momentum5: x.momentum5,
+            momentum20: x.momentum20,
+            volatility: x.volatility
+          })),
 
         recommendation: {
           stock: winner.stock,
@@ -527,10 +622,14 @@ async function runApp() {
 
       }, null, 2);
 
-    document.getElementById('apiStatus').textContent =
+    document.getElementById(
+      'apiStatus'
+    ).textContent =
       'Live Market Data';
 
-    document.getElementById('apiStatus').className =
+    document.getElementById(
+      'apiStatus'
+    ).className =
       'status-pill pill-live';
 
     showState('app');
