@@ -1,19 +1,20 @@
 // ======================================
-// STOCKLENS — app.js (Finnhub Edition)
+// STOCKLENS — app.js
+// Primary:  Polygon.io (free tier)
+// Fallback: Yahoo Finance (CORS proxy)
 // ======================================
 //
-// DATA SOURCE: Finnhub
-//   Docs  → https://finnhub.io/docs/api
-//   Free tier → 60 calls/min, no daily cap
-//   Sign up   → https://finnhub.io (free)
+// SETUP — Polygon.io (takes ~2 minutes)
+//   1. Go to https://polygon.io and sign up (free, no card)
+//   2. Your API key appears on the dashboard immediately
+//   3. Paste it below, replacing YOUR_POLYGON_API_KEY
 //
-// HOW TO USE:
-//   1. Go to https://finnhub.io and create a free account
-//   2. Copy your API key from the dashboard
-//   3. Paste it below, replacing YOUR_FINNHUB_API_KEY
+// The app will automatically fall back to Yahoo Finance
+// if Polygon is unavailable or rate-limited (5 calls/min
+// on the free tier). No setup needed for the fallback.
 // ======================================
 
-const API_KEY = 'd87cd71r01ql0hsl70g0d87cd71r01ql0hsl70gg';
+const POLYGON_KEY = 'NSas3vD1pTpPUnRh7BOPayKIMWdRGMFG';
 
 const SECTORS = {
   MSFT: {
@@ -78,66 +79,125 @@ setInterval(updateClock, 1000);
 updateClock();
 
 // ======================================
-// API — Finnhub
+// DATA SOURCE TRACKING
+// Records which source each symbol
+// actually came from, for the JSON block.
 // ======================================
 
-/**
- * getHistory(symbol)
- *
- * Fetches 60 days of daily closing prices from Finnhub's
- * stock candle endpoint. Returns a plain array of numbers,
- * oldest price first.
- *
- * Finnhub candle endpoint:
- *   GET /stock/candle?symbol=MSFT&resolution=D&from=UNIX&to=UNIX&token=KEY
- *
- * Response shape when data exists:
- *   { s: "ok", c: [close, ...], h: [...], l: [...], o: [...], t: [...] }
- *
- * Response shape when no data (weekend, bad symbol, etc):
- *   { s: "no_data" }
- */
-async function getHistory(symbol) {
-  const to   = Math.floor(Date.now() / 1000);          // now (Unix seconds)
-  const from = to - 60 * 24 * 60 * 60;                 // 60 days ago
+const sourceLog = {};
+
+// ======================================
+// API — PRIMARY: Polygon.io
+// ======================================
+//
+// Endpoint: /v2/aggs/ticker/{symbol}/range/1/day/{from}/{to}
+// Returns:  daily OHLCV bars, adjusted for splits
+// Free tier: 5 calls/min, previous-day data (not real-time)
+//
+// If Polygon returns a 429 (rate limit), an error status,
+// or empty results, getHistory() catches it and immediately
+// tries Yahoo Finance instead. No manual delays needed.
+
+async function getHistoryPolygon(symbol) {
+  const toDate   = new Date();
+  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days back
+
+  // Polygon expects dates as YYYY-MM-DD
+  const to   = toDate.toISOString().split('T')[0];
+  const from = fromDate.toISOString().split('T')[0];
 
   const url =
-    `https://finnhub.io/api/v1/stock/candle` +
-    `?symbol=${symbol}` +
-    `&resolution=D` +
-    `&from=${from}` +
-    `&to=${to}` +
-    `&token=${API_KEY}`;
+    `https://api.polygon.io/v2/aggs/ticker/${symbol}/range/1/day/${from}/${to}` +
+    `?adjusted=true&sort=asc&limit=90&apiKey=${POLYGON_KEY}`;
 
-  const res  = await fetch(url);
+  const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const data = await res.json();
 
-  if (data.s !== 'ok' || !data.c?.length) {
-    throw new Error(`No price history available for ${symbol}`);
+  // 429 = rate limited. Anything other than OK = problem.
+  if (res.status === 429 || data.status !== 'OK' || !data.results?.length) {
+    throw new Error(`Polygon unavailable for ${symbol} (${data.status ?? res.status})`);
   }
 
-  return data.c; // array of daily closing prices
+  return data.results.map(bar => bar.c); // array of daily close prices
 }
 
-/**
- * getQuote(symbol)
- *
- * Returns current price and 60-day high by re-using getHistory.
- * Importantly, it also returns the full history array so that
- * runApp does NOT need to call getHistory again for the same
- * symbol — that was the double-fetch bug in the original code.
- */
+// ======================================
+// API — FALLBACK: Yahoo Finance
+// ======================================
+//
+// Yahoo Finance has no public API key requirement, but browsers
+// can't call it directly due to CORS. We route through two free
+// CORS proxy services in sequence. If one is down, the other
+// takes over automatically.
+
+const YAHOO_PROXIES = [
+  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+  u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+];
+
+async function getHistoryYahoo(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
+
+  for (const makeProxy of YAHOO_PROXIES) {
+    try {
+      const res  = await fetch(makeProxy(url), { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
+
+      const data   = await res.json();
+      const closes = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+
+      if (closes?.length) {
+        return closes.filter(c => c != null && isFinite(c));
+      }
+    } catch (_) {
+      // try the next proxy
+    }
+  }
+
+  throw new Error(`Yahoo Finance also failed for ${symbol}`);
+}
+
+// ======================================
+// API — getHistory (with fallback logic)
+// ======================================
+//
+// Always tries Polygon first. If Polygon fails for any reason
+// (bad key, rate limit, network error), falls back to Yahoo.
+// The sourceLog records which source was actually used.
+
+async function getHistory(symbol) {
+  try {
+    const closes = await getHistoryPolygon(symbol);
+    sourceLog[symbol] = 'Polygon.io';
+    return closes;
+  } catch (polygonErr) {
+    console.warn(`Polygon failed for ${symbol} — trying Yahoo Finance:`, polygonErr.message);
+
+    const closes = await getHistoryYahoo(symbol);
+    sourceLog[symbol] = 'Yahoo Finance (fallback)';
+    return closes;
+  }
+}
+
+// ======================================
+// API — getQuote
+// ======================================
+//
+// Derives current price and 90-day high from the history array.
+// Returns history inside the object so runApp doesn't need
+// a second getHistory call for the same symbol.
+
 async function getQuote(symbol) {
   const history      = await getHistory(symbol);
   const currentPrice = history[history.length - 1];
-  const yearHigh     = Math.max(...history);           // 60-day high
+  const yearHigh     = Math.max(...history);
 
   return {
     symbol,
     name: symbol,
     price: currentPrice,
     yearHigh,
-    history,   // ← included here so runApp can skip the second fetch
+    history, // included — prevents a redundant second fetch in runApp
   };
 }
 
@@ -284,9 +344,11 @@ function renderSectorTable(ranked) {
 async function runApp() {
   try {
     showState('loading');
+    Object.keys(sourceLog).forEach(k => delete sourceLog[k]); // reset log
 
-    // ── Step 1: Score each sector ──────────────────────────────
-    // One API call per sector representative (4 calls total).
+    // ── Step 1: Score each sector ────────────────────────────
+    // Polygon free = 5 calls/min. If the limit is hit mid-loop,
+    // the fallback to Yahoo kicks in automatically per symbol.
     setLoadingStep('Analysing sector momentum');
 
     const sectorResults = [];
@@ -294,18 +356,15 @@ async function runApp() {
     for (const sector of Object.keys(SECTORS)) {
       const result = await analyseSector(sector);
       sectorResults.push(result);
-      // No delay needed — Finnhub allows 60 calls/min
     }
 
     sectorResults.sort((a, b) => b.score - a.score);
     const winningSector = sectorResults[0];
 
-    // ── Step 2: Analyse stocks in the winning sector ───────────
-    // getQuote returns history inside the object, so we do NOT
-    // call getHistory again — that was the double-fetch bug fixed.
+    // ── Step 2: Analyse stocks in the winning sector ─────────
     setLoadingStep('Selecting strongest blue-chip stock');
 
-    const stockSymbols  = SECTORS[winningSector.symbol].stocks;
+    const stockSymbols   = SECTORS[winningSector.symbol].stocks;
     const analysedStocks = [];
 
     for (const symbol of stockSymbols) {
@@ -314,7 +373,7 @@ async function runApp() {
       const stock = {
         ...quote,
         currentPrice: quote.price,
-        history:      quote.history, // ← already fetched inside getQuote
+        history:      quote.history, // already fetched — no second call needed
       };
 
       const model = buildTradeModel(stock);
@@ -324,19 +383,26 @@ async function runApp() {
     analysedStocks.sort((a, b) => b.model.rr - a.model.rr);
     const winner = analysedStocks[0];
 
-    // ── Step 3: Render ─────────────────────────────────────────
+    // ── Step 3: Render ───────────────────────────────────────
     renderHero(winningSector.symbol, winningSector.momentum5);
     renderTrade(winner.stock, winner.model);
     renderSectorTable(sectorResults);
 
+    // Summarise which source each symbol actually came from
+    const sourceSummary = {};
+    Object.entries(sourceLog).forEach(([sym, src]) => {
+      sourceSummary[src] = sourceSummary[src] ?? [];
+      sourceSummary[src].push(sym);
+    });
+
     document.getElementById('jsonBlock').textContent =
       JSON.stringify({
         generatedAt:   new Date().toISOString(),
-        dataSource:    'Finnhub (live)',
+        dataSources:   sourceSummary,
         winningSector: winningSector.symbol,
         recommendation: {
           stock: winner.stock,
-          model: winner.model
+          model: winner.model,
         }
       }, null, 2);
 
