@@ -14,19 +14,19 @@ const SECTORS = {
   JPM: {
     name: 'Financials',
     emoji: '🏦',
-    stocks: ['JPM', 'V', 'MA']
+    stocks: ['JPM', 'V']
   },
 
   XOM: {
     name: 'Energy',
     emoji: '⚡',
-    stocks: ['XOM', 'CVX']
+    stocks: ['XOM']
   },
 
-  JNJ: {
+  LLY: {
     name: 'Healthcare',
     emoji: '🏥',
-    stocks: ['LLY', 'JNJ']
+    stocks: ['LLY']
   }
 };
 
@@ -403,12 +403,22 @@ async function runApp() {
 
     const sectorResults = [];
 
+    // =================================
+    // ALPHAVANTAGE FREE TIER:
+    // 5 REQUESTS / MINUTE
+    // =================================
+
     for (const sector of Object.keys(SECTORS)) {
 
       const result =
         await analyseSector(sector);
 
       sectorResults.push(result);
+
+      // slow down requests
+      await new Promise(resolve =>
+        setTimeout(resolve, 15000)
+      );
     }
 
     sectorResults.sort(
@@ -448,6 +458,11 @@ async function runApp() {
         stock,
         model
       });
+
+      // slow down requests
+      await new Promise(resolve =>
+        setTimeout(resolve, 15000)
+      );
     }
 
     analysedStocks.sort((a, b) =>
