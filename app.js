@@ -110,8 +110,11 @@ async function getQuote(symbol) {
 
 async function getHistory(symbol) {
 
-  const url =
+  const target =
     `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
+
+  const url =
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`;
 
   const res = await fetch(url);
 
