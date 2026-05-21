@@ -8,10 +8,6 @@
 //   1. Go to https://polygon.io and sign up (free, no card)
 //   2. Your API key appears on the dashboard immediately
 //   3. Paste it below, replacing YOUR_POLYGON_API_KEY
-//
-// The app will automatically fall back to Yahoo Finance
-// if Polygon is unavailable or rate-limited (5 calls/min
-// on the free tier). No setup needed for the fallback.
 // ======================================
 
 const POLYGON_KEY = 'NSas3vD1pTpPUnRh7BOPayKIMWdRGMFG';
@@ -80,8 +76,6 @@ updateClock();
 
 // ======================================
 // DATA SOURCE TRACKING
-// Records which source each symbol
-// actually came from, for the JSON block.
 // ======================================
 
 const sourceLog = {};
@@ -89,20 +83,11 @@ const sourceLog = {};
 // ======================================
 // API — PRIMARY: Polygon.io
 // ======================================
-//
-// Endpoint: /v2/aggs/ticker/{symbol}/range/1/day/{from}/{to}
-// Returns:  daily OHLCV bars, adjusted for splits
-// Free tier: 5 calls/min, previous-day data (not real-time)
-//
-// If Polygon returns a 429 (rate limit), an error status,
-// or empty results, getHistory() catches it and immediately
-// tries Yahoo Finance instead. No manual delays needed.
 
 async function getHistoryPolygon(symbol) {
   const toDate   = new Date();
-  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days back
+  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-  // Polygon expects dates as YYYY-MM-DD
   const to   = toDate.toISOString().split('T')[0];
   const from = fromDate.toISOString().split('T')[0];
 
@@ -113,22 +98,20 @@ async function getHistoryPolygon(symbol) {
   const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const data = await res.json();
 
-  // 429 = rate limited. Anything other than OK = problem.
-  if (res.status === 429 || data.status !== 'OK' || !data.results?.length) {
+  // FIX: Polygon free plan returns "DELAYED" instead of "OK".
+  // Both statuses include valid price data — accept either.
+  const validStatus = data.status === 'OK' || data.status === 'DELAYED';
+
+  if (res.status === 429 || !validStatus || !data.results?.length) {
     throw new Error(`Polygon unavailable for ${symbol} (${data.status ?? res.status})`);
   }
 
-  return data.results.map(bar => bar.c); // array of daily close prices
+  return data.results.map(bar => bar.c);
 }
 
 // ======================================
 // API — FALLBACK: Yahoo Finance
 // ======================================
-//
-// Yahoo Finance has no public API key requirement, but browsers
-// can't call it directly due to CORS. We route through two free
-// CORS proxy services in sequence. If one is down, the other
-// takes over automatically.
 
 const YAHOO_PROXIES = [
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
@@ -150,7 +133,7 @@ async function getHistoryYahoo(symbol) {
         return closes.filter(c => c != null && isFinite(c));
       }
     } catch (_) {
-      // try the next proxy
+      // try next proxy
     }
   }
 
@@ -158,12 +141,8 @@ async function getHistoryYahoo(symbol) {
 }
 
 // ======================================
-// API — getHistory (with fallback logic)
+// API — getHistory (with fallback)
 // ======================================
-//
-// Always tries Polygon first. If Polygon fails for any reason
-// (bad key, rate limit, network error), falls back to Yahoo.
-// The sourceLog records which source was actually used.
 
 async function getHistory(symbol) {
   try {
@@ -171,8 +150,7 @@ async function getHistory(symbol) {
     sourceLog[symbol] = 'Polygon.io';
     return closes;
   } catch (polygonErr) {
-    console.warn(`Polygon failed for ${symbol} — trying Yahoo Finance:`, polygonErr.message);
-
+    console.warn(`Polygon failed for ${symbol} — trying Yahoo:`, polygonErr.message);
     const closes = await getHistoryYahoo(symbol);
     sourceLog[symbol] = 'Yahoo Finance (fallback)';
     return closes;
@@ -182,10 +160,6 @@ async function getHistory(symbol) {
 // ======================================
 // API — getQuote
 // ======================================
-//
-// Derives current price and 90-day high from the history array.
-// Returns history inside the object so runApp doesn't need
-// a second getHistory call for the same symbol.
 
 async function getQuote(symbol) {
   const history      = await getHistory(symbol);
@@ -197,7 +171,7 @@ async function getQuote(symbol) {
     name: symbol,
     price: currentPrice,
     yearHigh,
-    history, // included — prevents a redundant second fetch in runApp
+    history,
   };
 }
 
@@ -344,40 +318,59 @@ function renderSectorTable(ranked) {
 async function runApp() {
   try {
     showState('loading');
-    Object.keys(sourceLog).forEach(k => delete sourceLog[k]); // reset log
+    Object.keys(sourceLog).forEach(k => delete sourceLog[k]);
 
     // ── Step 1: Score each sector ────────────────────────────
-    // Polygon free = 5 calls/min. If the limit is hit mid-loop,
-    // the fallback to Yahoo kicks in automatically per symbol.
+    // FIX: each sector is wrapped in its own try/catch.
+    // If a symbol fails both Polygon and Yahoo, it is skipped
+    // and the remaining sectors are still ranked normally.
     setLoadingStep('Analysing sector momentum');
 
     const sectorResults = [];
 
     for (const sector of Object.keys(SECTORS)) {
-      const result = await analyseSector(sector);
-      sectorResults.push(result);
+      try {
+        const result = await analyseSector(sector);
+        sectorResults.push(result);
+      } catch (err) {
+        console.warn(`Skipping sector ${sector} — both data sources failed:`, err.message);
+      }
+    }
+
+    if (!sectorResults.length) {
+      throw new Error('All sector data sources failed. Check your connection and try again.');
     }
 
     sectorResults.sort((a, b) => b.score - a.score);
     const winningSector = sectorResults[0];
 
     // ── Step 2: Analyse stocks in the winning sector ─────────
+    // FIX: same per-symbol try/catch — a stock that can't be
+    // fetched is skipped rather than crashing the whole app.
     setLoadingStep('Selecting strongest blue-chip stock');
 
     const stockSymbols   = SECTORS[winningSector.symbol].stocks;
     const analysedStocks = [];
 
     for (const symbol of stockSymbols) {
-      const quote = await getQuote(symbol);
+      try {
+        const quote = await getQuote(symbol);
 
-      const stock = {
-        ...quote,
-        currentPrice: quote.price,
-        history:      quote.history, // already fetched — no second call needed
-      };
+        const stock = {
+          ...quote,
+          currentPrice: quote.price,
+          history:      quote.history,
+        };
 
-      const model = buildTradeModel(stock);
-      analysedStocks.push({ stock, model });
+        const model = buildTradeModel(stock);
+        analysedStocks.push({ stock, model });
+      } catch (err) {
+        console.warn(`Skipping stock ${symbol} — both data sources failed:`, err.message);
+      }
+    }
+
+    if (!analysedStocks.length) {
+      throw new Error('Could not load any stocks in the leading sector. Try again shortly.');
     }
 
     analysedStocks.sort((a, b) => b.model.rr - a.model.rr);
@@ -388,7 +381,6 @@ async function runApp() {
     renderTrade(winner.stock, winner.model);
     renderSectorTable(sectorResults);
 
-    // Summarise which source each symbol actually came from
     const sourceSummary = {};
     Object.entries(sourceLog).forEach(([sym, src]) => {
       sourceSummary[src] = sourceSummary[src] ?? [];
