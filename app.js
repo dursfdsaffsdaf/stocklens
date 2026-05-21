@@ -110,20 +110,32 @@ async function getQuote(symbol) {
 
 async function getHistory(symbol) {
 
-  const target =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
-
   const url =
-    `https://corsproxy.io/?${encodeURIComponent(target)}`;
+    `https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}.us&i=d`;
 
-  const res = await fetch(url);
+  const proxy =
+    `https://corsproxy.io/?${encodeURIComponent(url)}`;
 
-  const data = await res.json();
+  const res = await fetch(proxy);
 
-  const closes =
-    data.chart.result[0].indicators.quote[0].close;
+  const text = await res.text();
 
-  return closes.filter(v => v !== null);
+  const lines = text.trim().split('\n');
+
+  const closes = [];
+
+  for (let i = 1; i < lines.length; i++) {
+
+    const cols = lines[i].split(',');
+
+    const close = parseFloat(cols[4]);
+
+    if (!isNaN(close)) {
+      closes.push(close);
+    }
+  }
+
+  return closes.slice(-60);
 }
 
 function movingAverage(arr, period) {
