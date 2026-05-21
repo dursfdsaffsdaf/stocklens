@@ -1,13 +1,13 @@
 // ======================================
 // STOCKLENS — app.js
-// Primary: Financial Modeling Prep (FMP)
+// Primary: Financial Modeling Prep (FMP) STABLE endpoints
 // Backup:  Polygon.io
-// Fallback: Yahoo Finance (CORS proxy)
+// Fallback: Yahoo Finance (via CORS proxies)
 // ======================================
 //
 // SECURITY NOTE:
-// This is a client-side app. Any API key hardcoded here will be exposed to anyone who loads the site.
-// If you commit this to a public repo, assume the keys are compromised.
+// This is a client-side app. Any API key embedded here is exposed to users.
+// Do not commit real keys to a public repo.
 //
 // ======================================
 
@@ -22,33 +22,21 @@ const POLYGON_KEYS = [
 
 // --- Provider timeouts (ms) ---
 const PROVIDER_TIMEOUT_MS = {
-  FMP: 6500,
-  POLYGON: 8000,
-  YAHOO: 8000,
+  FMP: 8000,
+  POLYGON: 9000,
+  YAHOO: 9000,
 };
+
+// --- Simple in-memory cache to avoid rate limits ---
+const HISTORY_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+const historyCache = new Map(); // symbol -> { ts, closes, source }
 
 // --- Universe ---
 const SECTORS = {
-  MSFT: {
-    name: 'Technology',
-    emoji: '💻',
-    stocks: ['MSFT', 'NVDA', 'AAPL']
-  },
-  JPM: {
-    name: 'Financials',
-    emoji: '🏦',
-    stocks: ['JPM', 'V']
-  },
-  XOM: {
-    name: 'Energy',
-    emoji: '⚡',
-    stocks: ['XOM']
-  },
-  LLY: {
-    name: 'Healthcare',
-    emoji: '🏥',
-    stocks: ['LLY']
-  }
+  MSFT: { name: 'Technology', emoji: '💻', stocks: ['MSFT', 'NVDA', 'AAPL'] },
+  JPM: { name: 'Financials', emoji: '🏦', stocks: ['JPM', 'V'] },
+  XOM: { name: 'Energy', emoji: '⚡', stocks: ['XOM'] },
+  LLY: { name: 'Healthcare', emoji: '🏥', stocks: ['LLY'] }
 };
 
 // ======================================
@@ -95,15 +83,12 @@ async function fetchJson(url, timeoutMs) {
   try {
     const res = await fetch(url, { signal: t.signal });
     const text = await res.text();
-
-    // Some proxies/providers return HTML or empty response on failure.
     let data = null;
     try {
       data = text ? JSON.parse(text) : null;
     } catch (_) {
       data = null;
     }
-
     return { res, data, rawText: text };
   } finally {
     t.cancel();
@@ -117,47 +102,63 @@ function normalizeCloses(closes) {
     .filter(v => v != null && isFinite(v) && v > 0);
 }
 
+function isoDate(d) {
+  return d.toISOString().split('T')[0];
+}
+
 // ======================================
-// API — PRIMARY: Financial Modeling Prep (FMP)
+// API — PRIMARY: Financial Modeling Prep (FMP) STABLE
 // ======================================
 //
-// Endpoint style (daily):
-// /api/v3/historical-price-full/{symbol}?serietype=line&apikey=...
+// Stable endpoint returns a flat array of objects:
+// [{ symbol, date, price, volume }, ...]
+// Endpoint: https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD&apikey=...
 //
 async function getHistoryFMP(symbol) {
-  const urlBase = `https://financialmodelingprep.com/api/v3/historical-price-full/${encodeURIComponent(symbol)}?serietype=line`;
+  // Pull more than 90 calendar days to ensure ~90 trading days.
+  const toDate = new Date();
+  const fromDate = new Date(Date.now() - 140 * 24 * 60 * 60 * 1000);
+
+  const base =
+    `https://financialmodelingprep.com/stable/historical-price-eod/light` +
+    `?symbol=${encodeURIComponent(symbol)}` +
+    `&from=${encodeURIComponent(isoDate(fromDate))}` +
+    `&to=${encodeURIComponent(isoDate(toDate))}`;
 
   let lastErr = null;
 
   for (const key of FMP_KEYS) {
-    const url = `${urlBase}&apikey=${encodeURIComponent(key)}`;
+    const url = `${base}&apikey=${encodeURIComponent(key)}`;
 
     try {
       const { res, data } = await fetchJson(url, PROVIDER_TIMEOUT_MS.FMP);
 
-      if (!res.ok || !data || !Array.isArray(data.historical) || data.historical.length < 30) {
-        lastErr = new Error(`FMP bad response for ${symbol} (HTTP ${res.status})`);
+      if (!res.ok) {
+        lastErr = new Error(`FMP HTTP ${res.status}`);
         continue;
       }
 
-      // FMP often returns newest-first. Sort to oldest-first for consistency.
-      const sorted = data.historical
-        .filter(r => r && r.date && (r.close != null))
-        .slice(0, 2000) // safety cap
+      // Error payloads may be objects, not arrays.
+      if (!Array.isArray(data)) {
+        const msg = data?.['Error Message'] || data?.message || 'FMP bad payload';
+        lastErr = new Error(`FMP error: ${msg}`);
+        continue;
+      }
+
+      // Expect fields: date + price
+      const rows = data
+        .filter(r => r && r.date && (r.price != null))
         .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
-      const closes = normalizeCloses(sorted.map(r => r.close));
+      const closes = normalizeCloses(rows.map(r => r.price)).slice(-90);
 
-      // keep last ~90 trading closes
-      const trimmed = closes.slice(-90);
-
-      if (trimmed.length < 30) {
-        lastErr = new Error(`FMP insufficient data for ${symbol}`);
+      if (closes.length < 30) {
+        lastErr = new Error(`FMP insufficient data (${closes.length})`);
         continue;
       }
 
-      sourceLog[symbol] = `Financial Modeling Prep (primary)`;
-      return trimmed;
+      sourceLog[symbol] = 'Financial Modeling Prep (stable)';
+      return closes;
     } catch (e) {
       lastErr = e;
       continue;
@@ -175,10 +176,10 @@ async function getHistoryFMP(symbol) {
 //
 async function getHistoryPolygon(symbol) {
   const toDate = new Date();
-  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const fromDate = new Date(Date.now() - 140 * 24 * 60 * 60 * 1000);
 
-  const to = toDate.toISOString().split('T')[0];
-  const from = fromDate.toISOString().split('T')[0];
+  const to = isoDate(toDate);
+  const from = isoDate(fromDate);
 
   let lastErr = null;
 
@@ -190,25 +191,37 @@ async function getHistoryPolygon(symbol) {
     try {
       const { res, data } = await fetchJson(url, PROVIDER_TIMEOUT_MS.POLYGON);
 
-      if (
-        res.status === 429 ||
-        !res.ok ||
-        !data ||
-        data.status !== 'OK' ||
-        !Array.isArray(data.results) ||
-        data.results.length < 30
-      ) {
-        lastErr = new Error(`Polygon unavailable for ${symbol} (${data?.status ?? res.status})`);
+      if (res.status === 429) {
+        lastErr = new Error(`Polygon rate limited (429)`);
+        continue;
+      }
+      if (!res.ok || !data) {
+        lastErr = new Error(`Polygon HTTP ${res.status}`);
         continue;
       }
 
-      const closes = normalizeCloses(data.results.map(bar => bar.c));
+      // Accept OK or DELAYED if results exist.
+      const status = data.status;
+      const results = Array.isArray(data.results) ? data.results : [];
+
+      if (!results.length) {
+        lastErr = new Error(`Polygon empty results (${status ?? 'no-status'})`);
+        continue;
+      }
+      if (status !== 'OK' && status !== 'DELAYED') {
+        // Some statuses can still carry data; allow only the common ones.
+        lastErr = new Error(`Polygon status ${status}`);
+        continue;
+      }
+
+      const closes = normalizeCloses(results.map(bar => bar.c)).slice(-90);
+
       if (closes.length < 30) {
-        lastErr = new Error(`Polygon insufficient data for ${symbol}`);
+        lastErr = new Error(`Polygon insufficient data (${closes.length})`);
         continue;
       }
 
-      sourceLog[symbol] = `Polygon.io (backup)`;
+      sourceLog[symbol] = `Polygon.io (${status})`;
       return closes;
     } catch (e) {
       lastErr = e;
@@ -225,44 +238,64 @@ async function getHistoryPolygon(symbol) {
 const YAHOO_PROXIES = [
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  u => `https://thingproxy.freeboard.io/fetch/${u}`,
 ];
 
 async function getHistoryYahoo(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d`;
 
+  let lastErr = null;
+
   for (const makeProxy of YAHOO_PROXIES) {
     try {
       const { res, data } = await fetchJson(makeProxy(url), PROVIDER_TIMEOUT_MS.YAHOO);
-      if (!res.ok || !data) continue;
+      if (!res.ok || !data) {
+        lastErr = new Error(`Yahoo proxy HTTP ${res.status}`);
+        continue;
+      }
 
       const closes = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
-      const cleaned = normalizeCloses(closes);
+      const cleaned = normalizeCloses(closes).slice(-90);
 
       if (cleaned.length >= 30) {
-        sourceLog[symbol] = `Yahoo Finance (final fallback)`;
+        sourceLog[symbol] = `Yahoo Finance (proxy)`;
         return cleaned;
       }
-    } catch (_) {
-      // try next proxy
+
+      lastErr = new Error(`Yahoo insufficient data (${cleaned.length})`);
+    } catch (e) {
+      lastErr = e;
     }
   }
 
-  throw new Error(`Yahoo Finance also failed for ${symbol}`);
+  throw lastErr ?? new Error(`Yahoo failed for ${symbol}`);
 }
 
 // ======================================
-// API — getHistory (priority: FMP -> Polygon -> Yahoo)
+// API — getHistory (priority: cache -> FMP -> Polygon -> Yahoo)
 // ======================================
 async function getHistory(symbol) {
+  const cached = historyCache.get(symbol);
+  if (cached && (Date.now() - cached.ts) < HISTORY_CACHE_TTL_MS && Array.isArray(cached.closes)) {
+    sourceLog[symbol] = cached.source;
+    return cached.closes;
+  }
+
   try {
-    return await getHistoryFMP(symbol);
+    const closes = await getHistoryFMP(symbol);
+    historyCache.set(symbol, { ts: Date.now(), closes, source: sourceLog[symbol] });
+    return closes;
   } catch (fmpErr) {
     console.warn(`FMP failed for ${symbol} — trying Polygon.io:`, fmpErr.message);
     try {
-      return await getHistoryPolygon(symbol);
+      const closes = await getHistoryPolygon(symbol);
+      historyCache.set(symbol, { ts: Date.now(), closes, source: sourceLog[symbol] });
+      return closes;
     } catch (polygonErr) {
       console.warn(`Polygon failed for ${symbol} — trying Yahoo Finance:`, polygonErr.message);
-      return await getHistoryYahoo(symbol);
+      const closes = await getHistoryYahoo(symbol);
+      historyCache.set(symbol, { ts: Date.now(), closes, source: sourceLog[symbol] });
+      return closes;
     }
   }
 }
@@ -274,13 +307,7 @@ async function getQuote(symbol) {
   const history = await getHistory(symbol);
   const currentPrice = history[history.length - 1];
   const yearHigh = Math.max(...history);
-  return {
-    symbol,
-    name: symbol,
-    price: currentPrice,
-    yearHigh,
-    history,
-  };
+  return { symbol, name: symbol, price: currentPrice, yearHigh, history };
 }
 
 // ======================================
@@ -288,7 +315,8 @@ async function getQuote(symbol) {
 // ======================================
 function movingAverage(arr, period) {
   const slice = arr.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / Math.max(1, slice.length);
+  if (!slice.length) return 0;
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
 function calcMomentum(history, days) {
@@ -304,7 +332,8 @@ function calcATR(history) {
   for (let i = 1; i < history.length; i++) {
     ranges.push(Math.abs(history[i] - history[i - 1]));
   }
-  return ranges.reduce((a, b) => a + b, 0) / Math.max(1, ranges.length);
+  if (!ranges.length) return 0;
+  return ranges.reduce((a, b) => a + b, 0) / ranges.length;
 }
 
 // ======================================
@@ -336,16 +365,10 @@ function renderHero(sectorKey, perf) {
   const sec = SECTORS[sectorKey];
   document.getElementById('heroSector').innerHTML = `
     <div class="card hero-card">
-      <div class="eyebrow">
-        Current Leading Sector
-      </div>
+      <div class="eyebrow">Current Leading Sector</div>
       <div class="hero-row">
-        <div class="hero-title">
-          ${sec.emoji} ${sec.name}
-        </div>
-        <div class="hero-performance green">
-          +${perf.toFixed(2)}%
-        </div>
+        <div class="hero-title">${sec.emoji} ${sec.name}</div>
+        <div class="hero-performance green">+${perf.toFixed(2)}%</div>
       </div>
     </div>
   `;
@@ -354,25 +377,15 @@ function renderHero(sectorKey, perf) {
 function renderTrade(stock, model) {
   document.getElementById('tradeCard').innerHTML = `
     <div class="card trade-card">
-      <div class="eyebrow">
-        Active Trade Recommendation
-      </div>
+      <div class="eyebrow">Active Trade Recommendation</div>
       <div class="trade-header">
         <div>
-          <div class="trade-ticker">
-            ${stock.symbol}
-          </div>
-          <div class="trade-company">
-            ${stock.name}
-          </div>
+          <div class="trade-ticker">${stock.symbol}</div>
+          <div class="trade-company">${stock.name}</div>
         </div>
         <div>
-          <div class="current-price">
-            $${stock.currentPrice.toFixed(2)}
-          </div>
-          <div class="trade-company">
-            Current Price
-          </div>
+          <div class="current-price">$${stock.currentPrice.toFixed(2)}</div>
+          <div class="trade-company">Current Price</div>
         </div>
       </div>
       <div class="metrics-grid">
@@ -400,9 +413,7 @@ function renderTrade(stock, model) {
 function renderSectorTable(ranked) {
   document.getElementById('sectorTable').innerHTML = `
     <div class="card table-card">
-      <div class="eyebrow">
-        Sector Rankings
-      </div>
+      <div class="eyebrow">Sector Rankings</div>
       ${ranked.map((item, index) => `
         <div class="table-row">
           <div>${index + 1}</div>
@@ -421,11 +432,12 @@ function renderSectorTable(ranked) {
 async function runApp() {
   try {
     showState('loading');
-    Object.keys(sourceLog).forEach(k => delete sourceLog[k]); // reset log
+    Object.keys(sourceLog).forEach(k => delete sourceLog[k]);
 
     // ── Step 1: Score each sector ────────────────────────────
     setLoadingStep('Analysing sector momentum');
     const sectorResults = [];
+
     for (const sector of Object.keys(SECTORS)) {
       const result = await analyseSector(sector);
       sectorResults.push(result);
@@ -458,26 +470,23 @@ async function runApp() {
     renderTrade(winner.stock, winner.model);
     renderSectorTable(sectorResults);
 
-    // Summarise which source each symbol actually came from
+    // Summarise which source each symbol came from
     const sourceSummary = {};
     Object.entries(sourceLog).forEach(([sym, src]) => {
       sourceSummary[src] = sourceSummary[src] ?? [];
       sourceSummary[src].push(sym);
     });
 
-    document.getElementById('jsonBlock').textContent =
-      JSON.stringify({
-        generatedAt: new Date().toISOString(),
-        dataSources: sourceSummary,
-        winningSector: winningSector.symbol,
-        recommendation: {
-          stock: winner.stock,
-          model: winner.model,
-        }
-      }, null, 2);
+    document.getElementById('jsonBlock').textContent = JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      dataSources: sourceSummary,
+      winningSector: winningSector.symbol,
+      recommendation: { stock: winner.stock, model: winner.model },
+    }, null, 2);
 
-    document.getElementById('apiStatus').textContent = 'Live Market Data';
+    document.getElementById('apiStatus').textContent = 'Market Data Loaded';
     document.getElementById('apiStatus').className = 'status-pill pill-live';
+
     showState('app');
   } catch (err) {
     console.error(err);
