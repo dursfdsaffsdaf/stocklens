@@ -114,7 +114,7 @@ async function getHistory(symbol) {
     `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=3mo&interval=1d`;
 
   const url =
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`;
+    `https://corsproxy.io/?${encodeURIComponent(target)}`;
 
   const res = await fetch(url);
 
